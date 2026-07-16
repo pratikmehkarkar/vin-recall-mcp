@@ -35,3 +35,11 @@ Thumbs.db
 .wrangler/
 .dev.vars
 worker-configuration.d.ts
+
+# local Claude Code setup — not committed
+CLAUDE.md
+EPIC_VIN_Recall_MCP.md
+memory/
+skills/
+.claude/
+docs/
