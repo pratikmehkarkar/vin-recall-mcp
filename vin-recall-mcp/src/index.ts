@@ -28,6 +28,8 @@ const DECODE_FIELD_MAP = {
 	plantCountry: "Plant Country",
 } as const;
 
+type DecodedFields = Partial<Record<keyof typeof DECODE_FIELD_MAP, string>>;
+
 const decodeVinOutputSchema = {
 	found: z.boolean(),
 	vin: z.string(),
@@ -43,6 +45,28 @@ const decodeVinOutputSchema = {
 	note: z.string().optional(),
 };
 
+const recallCampaignSchema = z.object({
+	campaignNumber: z.string(),
+	summary: z.string(),
+	consequence: z.string().optional(),
+	remedy: z.string().optional(),
+	reportDate: z.string().optional(),
+	parkIt: z.boolean().optional(),
+	parkOutside: z.boolean().optional(),
+});
+
+const checkRecallsOutputSchema = {
+	vin: z.string(),
+	checked: z.boolean(),
+	make: z.string().optional(),
+	model: z.string().optional(),
+	year: z.string().optional(),
+	recallCount: z.number().optional(),
+	recalls: z.array(recallCampaignSchema).optional(),
+	summary: z.string(),
+	note: z.string().optional(),
+};
+
 // NHTSA marks "no data for this field" as an empty string or the literal
 // string "Not Applicable" rather than omitting the field, so both need to be
 // filtered out to get a clean object.
@@ -50,6 +74,10 @@ function isMeaningfulValue(value: string | null | undefined): value is string {
 	if (!value) return false;
 	const trimmed = value.trim();
 	return trimmed !== "" && trimmed.toLowerCase() !== "not applicable";
+}
+
+function endWithPeriod(text: string): string {
+	return /[.!?]$/.test(text) ? text : `${text}.`;
 }
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
@@ -60,6 +88,81 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+type DecodeOutcome =
+	| { status: "error"; message: string }
+	| { status: "not_found"; note: string }
+	| { status: "found"; decoded: DecodedFields; errorCode?: string; errorText?: string };
+
+// Shared by both tools: decode_vin exposes this directly, check_recalls uses
+// it internally to turn a VIN into the make/model/year the recalls endpoint
+// needs. Kept as a single implementation so both tools apply the exact same
+// validation, timeout, and "no data" handling.
+async function decodeVinFromNhtsa(normalizedVin: string): Promise<DecodeOutcome> {
+	let data: NhtsaDecodeVinResponse;
+	try {
+		const response = await fetchWithTimeout(
+			`https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${normalizedVin}?format=json`,
+			NHTSA_FETCH_TIMEOUT_MS,
+		);
+		if (!response.ok) {
+			return {
+				status: "error",
+				message: `NHTSA vPIC API returned an error (HTTP ${response.status}). Try again in a moment.`,
+			};
+		}
+		data = await response.json();
+	} catch (err) {
+		const timedOut = err instanceof Error && err.name === "AbortError";
+		return {
+			status: "error",
+			message: timedOut
+				? "The NHTSA vPIC API is slow or unavailable right now (timed out after 9s). Try again in a moment."
+				: "Could not reach the NHTSA vPIC API. Try again in a moment.",
+		};
+	}
+
+	const values = new Map<string, string>();
+	for (const result of data.Results ?? []) {
+		if (isMeaningfulValue(result.Value)) {
+			values.set(result.Variable, result.Value.trim());
+		}
+	}
+
+	const errorCode = values.get("Error Code");
+	const errorText = values.get("Error Text");
+	const make = values.get(DECODE_FIELD_MAP.make);
+
+	if (!make) {
+		const reason = endWithPeriod(errorText ?? "NHTSA returned no decodable data for this VIN.");
+		const note = `${reason} This can happen for pre-1981 vehicles (before the 17-character VIN standard), some foreign-market vehicles, or a mistyped VIN.`;
+		return { status: "not_found", note };
+	}
+
+	const decoded: DecodedFields = {};
+	for (const key of Object.keys(DECODE_FIELD_MAP) as (keyof typeof DECODE_FIELD_MAP)[]) {
+		const value = values.get(DECODE_FIELD_MAP[key]);
+		if (value) decoded[key] = value;
+	}
+
+	return { status: "found", decoded, errorCode, errorText };
+}
+
+interface NhtsaRecallRecord {
+	NHTSACampaignNumber?: string | null;
+	Summary?: string | null;
+	Consequence?: string | null;
+	Remedy?: string | null;
+	ReportReceivedDate?: string | null;
+	parkIt?: boolean;
+	// NHTSA's own field name — note the capital "S" in "OutSide".
+	parkOutSide?: boolean;
+}
+
+interface NhtsaRecallsResponse {
+	Count?: number;
+	results?: NhtsaRecallRecord[];
 }
 
 // Define our MCP agent with tools
@@ -105,74 +208,26 @@ export class MyMCP extends McpAgent {
 					};
 				}
 
-				let data: NhtsaDecodeVinResponse;
-				try {
-					const response = await fetchWithTimeout(
-						`https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${normalizedVin}?format=json`,
-						NHTSA_FETCH_TIMEOUT_MS,
-					);
-					if (!response.ok) {
-						return {
-							isError: true,
-							content: [
-								{
-									type: "text",
-									text: `NHTSA vPIC API returned an error (HTTP ${response.status}). Try again in a moment.`,
-								},
-							],
-						};
-					}
-					data = await response.json();
-				} catch (err) {
-					const timedOut = err instanceof Error && err.name === "AbortError";
-					return {
-						isError: true,
-						content: [
-							{
-								type: "text",
-								text: timedOut
-									? "The NHTSA vPIC API is slow or unavailable right now (timed out after 9s). Try again in a moment."
-									: "Could not reach the NHTSA vPIC API. Try again in a moment.",
-							},
-						],
-					};
+				const outcome = await decodeVinFromNhtsa(normalizedVin);
+
+				if (outcome.status === "error") {
+					return { isError: true, content: [{ type: "text", text: outcome.message }] };
 				}
 
-				const values = new Map<string, string>();
-				for (const result of data.Results ?? []) {
-					if (isMeaningfulValue(result.Value)) {
-						values.set(result.Variable, result.Value.trim());
-					}
-				}
-
-				const errorCode = values.get("Error Code");
-				const errorText = values.get("Error Text");
-				const make = values.get(DECODE_FIELD_MAP.make);
-
-				if (!make) {
-					const reason = errorText ?? "NHTSA returned no decodable data for this VIN.";
-					const reasonSentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
-					const note = `${reasonSentence} This can happen for pre-1981 vehicles (before the 17-character VIN standard), some foreign-market vehicles, or a mistyped VIN.`;
+				if (outcome.status === "not_found") {
 					const summary = `No decode data found for VIN ${normalizedVin}.`;
 					return {
 						structuredContent: {
 							found: false,
 							vin: normalizedVin,
 							summary,
-							note,
+							note: outcome.note,
 						},
-						content: [{ type: "text", text: `${summary} ${note}` }],
+						content: [{ type: "text", text: `${summary} ${outcome.note}` }],
 					};
 				}
 
-				const decoded: Partial<Record<keyof typeof DECODE_FIELD_MAP, string>> = {};
-				for (const key of Object.keys(
-					DECODE_FIELD_MAP,
-				) as (keyof typeof DECODE_FIELD_MAP)[]) {
-					const value = values.get(DECODE_FIELD_MAP[key]);
-					if (value) decoded[key] = value;
-				}
-
+				const { decoded, errorCode, errorText } = outcome;
 				const headline = [decoded.year, decoded.make, decoded.model]
 					.filter(Boolean)
 					.join(" ");
@@ -205,6 +260,184 @@ export class MyMCP extends McpAgent {
 						...(note ? { note } : {}),
 					},
 					content: [{ type: "text", text: note ? `${summary}\n\n${note}` : summary }],
+				};
+			},
+		);
+
+		this.server.registerTool(
+			"check_recalls",
+			{
+				title: "Check Vehicle Recalls",
+				description:
+					"List open safety recall campaigns for a vehicle by VIN, using the NHTSA " +
+					"Recalls database. Decodes the VIN internally to get make/model/year, then " +
+					"looks up campaigns for that vehicle configuration. Important: results are " +
+					"recall campaigns issued for the make/model/year configuration — this does " +
+					"NOT confirm whether this specific VIN's vehicle was actually repaired at a " +
+					"dealer. Always describe results as 'open recall campaigns for this vehicle,' " +
+					"never as whether the car 'is' or 'isn't' fixed.",
+				inputSchema: {
+					vin: z
+						.string()
+						.describe(
+							"A 17-character US vehicle VIN (letters and digits, excluding I, O, and Q). " +
+								"The VIN is decoded internally to determine make/model/year for the recall lookup.",
+						),
+				},
+				outputSchema: checkRecallsOutputSchema,
+			},
+			async ({ vin }) => {
+				const normalizedVin = vin.trim().toUpperCase();
+
+				if (!VIN_PATTERN.test(normalizedVin)) {
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: `"${vin}" is not a valid VIN: expected exactly 17 characters, letters and digits only, excluding I, O, and Q.`,
+							},
+						],
+					};
+				}
+
+				const decodeOutcome = await decodeVinFromNhtsa(normalizedVin);
+
+				if (decodeOutcome.status === "error") {
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: `Could not decode this VIN to look up recalls: ${decodeOutcome.message}`,
+							},
+						],
+					};
+				}
+
+				if (decodeOutcome.status === "not_found") {
+					const summary = `Could not check recalls for VIN ${normalizedVin}: the vehicle could not be decoded.`;
+					return {
+						structuredContent: {
+							vin: normalizedVin,
+							checked: false,
+							summary,
+							note: decodeOutcome.note,
+						},
+						content: [{ type: "text", text: `${summary} ${decodeOutcome.note}` }],
+					};
+				}
+
+				const { make, model, year } = decodeOutcome.decoded;
+				if (!make || !model || !year) {
+					const summary = `Could not check recalls for VIN ${normalizedVin}: NHTSA did not return a complete make/model/year for this vehicle.`;
+					const note =
+						"A recall lookup requires make, model, and year. Try decode_vin on this VIN to see what NHTSA did return.";
+					return {
+						structuredContent: { vin: normalizedVin, checked: false, summary, note },
+						content: [{ type: "text", text: `${summary} ${note}` }],
+					};
+				}
+
+				const recallsUrl = new URL("https://api.nhtsa.gov/recalls/recallsByVehicle");
+				recallsUrl.searchParams.set("make", make);
+				recallsUrl.searchParams.set("model", model);
+				recallsUrl.searchParams.set("modelYear", year);
+
+				let recallsData: NhtsaRecallsResponse;
+				try {
+					const response = await fetchWithTimeout(
+						recallsUrl.toString(),
+						NHTSA_FETCH_TIMEOUT_MS,
+					);
+					// NHTSA's recalls endpoint returns HTTP 400 both for a genuinely
+					// empty "zero recall campaigns" result and for an unrecognized
+					// make/model — the response body ({Count, results}) is the same
+					// shape either way, so we parse the body for 200 and 400 alike and
+					// only treat other statuses as real failures.
+					if (!response.ok && response.status !== 400) {
+						return {
+							isError: true,
+							content: [
+								{
+									type: "text",
+									text: `NHTSA recalls API returned an error (HTTP ${response.status}). Try again in a moment.`,
+								},
+							],
+						};
+					}
+					recallsData = await response.json();
+				} catch (err) {
+					const timedOut = err instanceof Error && err.name === "AbortError";
+					return {
+						isError: true,
+						content: [
+							{
+								type: "text",
+								text: timedOut
+									? "The NHTSA recalls API is slow or unavailable right now (timed out after 9s). Try again in a moment."
+									: "Could not reach the NHTSA recalls API. Try again in a moment.",
+							},
+						],
+					};
+				}
+
+				const recalls = (recallsData.results ?? []).map((record) => {
+					const campaign: z.infer<typeof recallCampaignSchema> = {
+						campaignNumber: isMeaningfulValue(record.NHTSACampaignNumber)
+							? record.NHTSACampaignNumber.trim()
+							: "UNKNOWN",
+						summary: isMeaningfulValue(record.Summary)
+							? record.Summary.trim()
+							: "No summary provided by NHTSA.",
+					};
+					if (isMeaningfulValue(record.Consequence))
+						campaign.consequence = record.Consequence.trim();
+					if (isMeaningfulValue(record.Remedy)) campaign.remedy = record.Remedy.trim();
+					if (isMeaningfulValue(record.ReportReceivedDate))
+						campaign.reportDate = record.ReportReceivedDate.trim();
+					if (typeof record.parkIt === "boolean") campaign.parkIt = record.parkIt;
+					if (typeof record.parkOutSide === "boolean")
+						campaign.parkOutside = record.parkOutSide;
+					return campaign;
+				});
+
+				const vehicleDesc = `${year} ${make} ${model}`;
+
+				if (recalls.length === 0) {
+					const summary = `No open recall campaigns found for this vehicle (${vehicleDesc}).`;
+					return {
+						structuredContent: {
+							vin: normalizedVin,
+							checked: true,
+							make,
+							model,
+							year,
+							recallCount: 0,
+							recalls: [],
+							summary,
+						},
+						content: [{ type: "text", text: summary }],
+					};
+				}
+
+				const summary = `${recalls.length} open recall campaign${recalls.length === 1 ? "" : "s"} found for this vehicle (${vehicleDesc}).`;
+				const disclaimer =
+					"These are campaigns issued for this make/model/year configuration, not confirmation that this specific VIN's vehicle was repaired.";
+
+				return {
+					structuredContent: {
+						vin: normalizedVin,
+						checked: true,
+						make,
+						model,
+						year,
+						recallCount: recalls.length,
+						recalls,
+						summary,
+						note: disclaimer,
+					},
+					content: [{ type: "text", text: `${summary} ${disclaimer}` }],
 				};
 			},
 		);
