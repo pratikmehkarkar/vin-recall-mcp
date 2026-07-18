@@ -3,6 +3,7 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
 const NHTSA_FETCH_TIMEOUT_MS = 9000;
+const NHTSA_FETCH_TIMEOUT_LABEL = `${NHTSA_FETCH_TIMEOUT_MS / 1000}s`;
 
 // Standard VIN alphabet excludes I, O, and Q (too easily confused with 1, 0, D).
 const VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/;
@@ -118,7 +119,7 @@ async function decodeVinFromNhtsa(normalizedVin: string): Promise<DecodeOutcome>
 		return {
 			status: "error",
 			message: timedOut
-				? "The NHTSA vPIC API is slow or unavailable right now (timed out after 9s). Try again in a moment."
+				? `The NHTSA vPIC API is slow or unavailable right now (timed out after ${NHTSA_FETCH_TIMEOUT_LABEL}). Try again in a moment.`
 				: "Could not reach the NHTSA vPIC API. Try again in a moment.",
 		};
 	}
@@ -375,7 +376,7 @@ export class MyMCP extends McpAgent {
 							{
 								type: "text",
 								text: timedOut
-									? "The NHTSA recalls API is slow or unavailable right now (timed out after 9s). Try again in a moment."
+									? `The NHTSA recalls API is slow or unavailable right now (timed out after ${NHTSA_FETCH_TIMEOUT_LABEL}). Try again in a moment.`
 									: "Could not reach the NHTSA recalls API. Try again in a moment.",
 							},
 						],
