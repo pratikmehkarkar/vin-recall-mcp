@@ -35,6 +35,17 @@ export class MyMCP extends McpAgent {
 						),
 				},
 				outputSchema: decodeVinOutputSchema,
+				// Both tools are pure read-only lookups against public NHTSA data —
+				// without explicit annotations the MCP SDK defaults to
+				// destructiveHint: true / idempotentHint: false, which would
+				// misrepresent a harmless VIN lookup to clients that use these
+				// hints to decide whether to prompt for confirmation.
+				annotations: {
+					readOnlyHint: true,
+					destructiveHint: false,
+					idempotentHint: true,
+					openWorldHint: true,
+				},
 			},
 			async ({ vin }) => runDecodeVin(vin),
 		);
@@ -60,6 +71,12 @@ export class MyMCP extends McpAgent {
 						),
 				},
 				outputSchema: checkRecallsOutputSchema,
+				annotations: {
+					readOnlyHint: true,
+					destructiveHint: false,
+					idempotentHint: true,
+					openWorldHint: true,
+				},
 			},
 			async ({ vin }) => runCheckRecalls(vin),
 		);
