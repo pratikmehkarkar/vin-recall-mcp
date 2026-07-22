@@ -148,6 +148,7 @@ app.use((_req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 8787;
-app.listen(PORT, () => {
-	console.log(`VIN Recall MCP server listening on http://127.0.0.1:${PORT}/mcp`);
+const HOST = "127.0.0.1";
+app.listen(PORT, HOST, () => {
+	console.log(`VIN Recall MCP server listening on http://${HOST}:${PORT}/mcp`);
 });
