@@ -3,12 +3,10 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"deploy": "wrangler deploy",
 		"dev": "node --experimental-strip-types --watch src/server.ts",
 		"format": "oxfmt --write .",
 		"lint:fix": "oxlint --fix",
 		"start": "node --experimental-strip-types src/server.ts",
-		"cf-typegen": "wrangler types",
 		"type-check": "tsc --noEmit",
 		"eval": "node --experimental-strip-types evals/run.ts"
 	},
@@ -22,7 +20,6 @@
 		"@types/node": "^26.1.1",
 		"oxfmt": "^0.56.0",
 		"oxlint": "^1.71.0",
-		"typescript": "6.0.3",
-		"wrangler": "^4.110.0"
+		"typescript": "6.0.3"
 	}
 }
