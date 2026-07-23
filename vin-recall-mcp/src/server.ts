@@ -97,8 +97,14 @@ function buildServer(): McpServer {
 // createMcpExpressApp() (from the SDK) pre-applies express.json() body
 // parsing and, since we bind to 127.0.0.1 below, DNS-rebinding protection
 // on the Host header — both are relevant now that this runs as a real
-// standalone HTTP process instead of behind Cloudflare's edge.
-const app = createMcpExpressApp();
+// standalone HTTP process instead of behind Cloudflare's edge. Zenith's
+// Caddy reverse proxy forwards requests with Host set to the public
+// domain, so that domain must be explicitly allowlisted alongside
+// 127.0.0.1 or the DNS-rebinding check rejects every proxied request.
+const app = createMcpExpressApp({
+	host: "127.0.0.1",
+	allowedHosts: ["127.0.0.1", "vin-recall-mcp.zenithserver.duckdns.org"],
+});
 
 app.post("/mcp", async (req, res) => {
 	const server = buildServer();
