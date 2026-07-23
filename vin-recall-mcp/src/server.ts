@@ -149,6 +149,14 @@ app.delete("/mcp", (_req, res) => {
 	});
 });
 
+// Unauthenticated liveness check for external uptime monitors (e.g.
+// UptimeRobot) — deliberately separate from /mcp, which returns 405 for
+// GET by design and would otherwise be misread as "down" by monitors that
+// expect a plain 2xx.
+app.get("/health", (_req, res) => {
+	res.status(200).json({ status: "ok" });
+});
+
 app.use((_req, res) => {
 	res.status(404).send("Not found");
 });
