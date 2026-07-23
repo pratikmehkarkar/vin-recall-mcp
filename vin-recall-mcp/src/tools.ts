@@ -117,7 +117,7 @@ async function decodeVinFromNhtsa(normalizedVin: string): Promise<DecodeOutcome>
 				message: `NHTSA vPIC API returned an error (HTTP ${response.status}). Try again in a moment.`,
 			};
 		}
-		data = await response.json();
+		data = (await response.json()) as NhtsaDecodeVinResponse;
 	} catch (err) {
 		const timedOut = err instanceof Error && err.name === "AbortError";
 		return {
@@ -319,7 +319,7 @@ export async function runCheckRecalls(vin: string) {
 				],
 			};
 		}
-		recallsData = await response.json();
+		recallsData = (await response.json()) as NhtsaRecallsResponse;
 	} catch (err) {
 		const timedOut = err instanceof Error && err.name === "AbortError";
 		return {
