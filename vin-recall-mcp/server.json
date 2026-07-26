@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pratikmehkarkar/vin-recall-mcp",
+  "description": "Decodes US VINs and looks up open NHTSA safety recall campaigns for a vehicle.",
+  "repository": {
+    "url": "https://github.com/pratikmehkarkar/vin-recall-mcp",
+    "source": "github",
+    "subfolder": "vin-recall-mcp"
+  },
+  "version": "1.0.0",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/pratikmehkarkar/vin-recall-mcp/main/vin-mcp.png",
+      "mimeType": "image/png",
+      "sizes": ["1024x1024"]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://vin-recall-mcp.zenithserver.duckdns.org/mcp"
+    }
+  ]
+}
