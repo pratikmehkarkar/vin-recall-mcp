@@ -26,6 +26,14 @@ export interface EvalCase {
 	expectStructuredAbsent?: string[];
 	// For check_recalls: minimum number of recall campaigns expected.
 	expectRecallCountAtLeast?: number;
+	// For check_recalls: every campaign in structuredContent.recalls must
+	// also appear in the *text* content (campaign number + the opening of its
+	// summary) — clients like Claude mainly read text, so a campaign that
+	// only exists in structuredContent is effectively invisible to the model.
+	expectEveryCampaignInText?: boolean;
+	// Upper bound on text content length, to keep long recall lists a
+	// reasonable size for a model's context.
+	expectTextMaxLength?: number;
 }
 
 export const cases: EvalCase[] = [
@@ -112,14 +120,56 @@ export const cases: EvalCase[] = [
 	{
 		id: "recalls-known-recalls",
 		description:
-			"VIN for a vehicle configuration (2003 Honda Accord) with real open NHTSA recall campaigns returns a non-empty list plus the VIN-is-not-repair-confirmation disclaimer",
+			"VIN for a vehicle configuration (2003 Honda Accord, 24 campaigns) with real open NHTSA recall campaigns returns every campaign's details (number, component, summary, report date) in the text content — not just a count — plus the VIN-is-not-repair-confirmation disclaimer, shortened to a reasonable length without dropping campaigns. Report dates are normalized from NHTSA's day-first DD/MM/YYYY to ISO (06/03/2019 -> 2019-03-06).",
 		tool: "check_recalls",
 		vin: "1HGCM82633A004352",
 		expectApiCall: true,
 		expectIsError: false,
 		expectStructured: { checked: true, make: "HONDA", model: "Accord", year: "2003" },
+		expectRecallCountAtLeast: 20,
+		expectTextIncludes: [
+			"open recall campaign",
+			"not confirmation that this specific VIN",
+			"Campaign 19V182000 — AIR BAGS:FRONTAL:DRIVER SIDE:INFLATOR MODULE",
+			"Summary: Honda (American Honda Motor Co.) is recalling",
+			"Report date: 2019-03-06",
+			"is shortened",
+		],
+		expectEveryCampaignInText: true,
+		expectTextMaxLength: 25000,
+	},
+	{
+		id: "recalls-park-it-warning",
+		description:
+			"VIN for a vehicle configuration (2006 Ford Ranger) with Takata 'do not drive' campaigns surfaces a PARK IT warning at the top of the text content, before the per-campaign list",
+		tool: "check_recalls",
+		vin: "1FTYR10U26PA12345",
+		expectApiCall: true,
+		expectIsError: false,
+		expectStructured: { checked: true, make: "FORD", model: "Ranger", year: "2006" },
 		expectRecallCountAtLeast: 1,
-		expectTextIncludes: ["open recall campaign", "not confirmation that this specific VIN"],
+		expectTextIncludes: ["WARNING — PARK IT", "18V022000", "PARK IT: do not drive"],
+		expectEveryCampaignInText: true,
+		expectTextMaxLength: 25000,
+	},
+	{
+		id: "recalls-park-outside-warning",
+		description:
+			"VIN for a vehicle configuration (2019 Hyundai Tucson) with an ABS-module fire-risk campaign (20V543000) surfaces a PARK OUTSIDE warning at the top of the text content and on the campaign block itself. Single campaign, so text is not shortened.",
+		tool: "check_recalls",
+		vin: "KM8J33A47KU012345",
+		expectApiCall: true,
+		expectIsError: false,
+		expectStructured: { checked: true, make: "HYUNDAI", model: "Tucson", year: "2019" },
+		expectRecallCountAtLeast: 1,
+		expectTextIncludes: [
+			"WARNING — PARK OUTSIDE",
+			"20V543000",
+			"PARK OUTSIDE: park outside and away from structures",
+			"Report date: 2020-09-04",
+		],
+		expectEveryCampaignInText: true,
+		expectTextMaxLength: 25000,
 	},
 	{
 		id: "recalls-zero-recalls",

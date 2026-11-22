@@ -52,6 +52,7 @@ export const decodeVinOutputSchema = {
 
 const recallCampaignSchema = z.object({
 	campaignNumber: z.string(),
+	component: z.string().optional(),
 	summary: z.string(),
 	consequence: z.string().optional(),
 	remedy: z.string().optional(),
@@ -156,6 +157,7 @@ async function decodeVinFromNhtsa(normalizedVin: string): Promise<DecodeOutcome>
 
 interface NhtsaRecallRecord {
 	NHTSACampaignNumber?: string | null;
+	Component?: string | null;
 	Summary?: string | null;
 	Consequence?: string | null;
 	Remedy?: string | null;
@@ -168,6 +170,107 @@ interface NhtsaRecallRecord {
 interface NhtsaRecallsResponse {
 	Count?: number;
 	results?: NhtsaRecallRecord[];
+}
+
+type RecallCampaign = z.infer<typeof recallCampaignSchema>;
+
+// NHTSA's free-text fields often contain double spaces between sentences
+// and stray newlines; collapse them so the text output reads cleanly.
+function cleanText(value: string): string {
+	return value.replace(/\s+/g, " ").trim();
+}
+
+// ReportReceivedDate is day-first (DD/MM/YYYY — e.g. "27/06/2019"), which a
+// US reader or a model would easily misread as month-first ("06/03/2019" is
+// 6 March, not June 3). Normalize to unambiguous ISO YYYY-MM-DD; anything
+// that doesn't match the expected shape is passed through untouched rather
+// than guessed at.
+function normalizeReportDate(raw: string): string {
+	const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw);
+	if (!match) return raw;
+	const [, day, month, year] = match;
+	if (Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > 31) return raw;
+	return `${year}-${month}-${day}`;
+}
+
+// Above this many campaigns, long free-text fields in the *text* content are
+// shortened so the result stays a reasonable size for a model's context
+// (a 2003 Honda Accord has 24 campaigns, ~40k chars untruncated). Campaigns
+// are never dropped, and structuredContent always carries the full text.
+const RECALL_COMPACT_THRESHOLD = 5;
+const COMPACT_SUMMARY_CHARS = 400;
+const COMPACT_CONSEQUENCE_CHARS = 250;
+const COMPACT_REMEDY_CHARS = 200;
+
+// Cut at the last word boundary before maxChars and mark with an ellipsis,
+// so a shortened field never ends mid-word.
+function shorten(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	const cut = text.slice(0, maxChars);
+	const lastSpace = cut.lastIndexOf(" ");
+	const base = lastSpace > maxChars * 0.6 ? cut.slice(0, lastSpace) : cut;
+	return `${base.replace(/[\s,;:.]+$/, "")}…`;
+}
+
+function formatCampaignBlock(campaign: RecallCampaign, index: number, compact: boolean): string {
+	const fit = (text: string, maxChars: number) => (compact ? shorten(text, maxChars) : text);
+	const lines = [
+		`[${index + 1}] Campaign ${campaign.campaignNumber}${campaign.component ? ` — ${campaign.component}` : ""}`,
+	];
+	if (campaign.reportDate) lines.push(`Report date: ${campaign.reportDate}`);
+	if (campaign.parkIt) lines.push("PARK IT: do not drive until the remedy is completed.");
+	if (campaign.parkOutside)
+		lines.push(
+			"PARK OUTSIDE: park outside and away from structures until the remedy is completed.",
+		);
+	lines.push(`Summary: ${fit(campaign.summary, COMPACT_SUMMARY_CHARS)}`);
+	if (campaign.consequence)
+		lines.push(`Consequence: ${fit(campaign.consequence, COMPACT_CONSEQUENCE_CHARS)}`);
+	if (campaign.remedy) lines.push(`Remedy: ${fit(campaign.remedy, COMPACT_REMEDY_CHARS)}`);
+	return lines.join("\n");
+}
+
+// Builds the human/model-readable text content for a non-empty recall list.
+// MCP clients (including Claude) primarily read the text content, so every
+// campaign's details must appear here — not only in structuredContent.
+function formatRecallsText(
+	headline: string,
+	disclaimer: string,
+	recalls: RecallCampaign[],
+): string {
+	const compact = recalls.length > RECALL_COMPACT_THRESHOLD;
+	const sections = [`${headline}\n${disclaimer}`];
+
+	// Safety-critical flags go first so they can't get lost in a long list.
+	const parkIt = recalls.filter((r) => r.parkIt).map((r) => r.campaignNumber);
+	const parkOutside = recalls.filter((r) => r.parkOutside).map((r) => r.campaignNumber);
+	const warnings: string[] = [];
+	if (parkIt.length > 0) {
+		warnings.push(
+			`WARNING — PARK IT: NHTSA advises owners of affected vehicles not to drive them until the remedy is completed (campaign${parkIt.length === 1 ? "" : "s"} ${parkIt.join(", ")}).`,
+		);
+	}
+	if (parkOutside.length > 0) {
+		warnings.push(
+			`WARNING — PARK OUTSIDE: NHTSA advises owners of affected vehicles to park outside and away from structures (fire risk) until the remedy is completed (campaign${parkOutside.length === 1 ? "" : "s"} ${parkOutside.join(", ")}).`,
+		);
+	}
+	if (warnings.length > 0) {
+		warnings.push(
+			"Whether this specific VIN's remedy has already been completed can be checked at https://www.nhtsa.gov/recalls.",
+		);
+		sections.push(warnings.join("\n"));
+	}
+
+	recalls.forEach((campaign, i) => sections.push(formatCampaignBlock(campaign, i, compact)));
+
+	if (compact) {
+		sections.push(
+			`Because this vehicle has ${recalls.length} campaigns, long summary/consequence/remedy text above is shortened (marked "…"). Full text is in the structured result and at https://www.nhtsa.gov/recalls.`,
+		);
+	}
+
+	return sections.join("\n\n");
 }
 
 // The actual per-tool logic, extracted as standalone functions so both the
@@ -336,18 +439,20 @@ export async function runCheckRecalls(vin: string) {
 	}
 
 	const recalls = (recallsData.results ?? []).map((record) => {
-		const campaign: z.infer<typeof recallCampaignSchema> = {
+		const campaign: RecallCampaign = {
 			campaignNumber: isMeaningfulValue(record.NHTSACampaignNumber)
 				? record.NHTSACampaignNumber.trim()
 				: "UNKNOWN",
 			summary: isMeaningfulValue(record.Summary)
-				? record.Summary.trim()
+				? cleanText(record.Summary)
 				: "No summary provided by NHTSA.",
 		};
-		if (isMeaningfulValue(record.Consequence)) campaign.consequence = record.Consequence.trim();
-		if (isMeaningfulValue(record.Remedy)) campaign.remedy = record.Remedy.trim();
+		if (isMeaningfulValue(record.Component)) campaign.component = cleanText(record.Component);
+		if (isMeaningfulValue(record.Consequence))
+			campaign.consequence = cleanText(record.Consequence);
+		if (isMeaningfulValue(record.Remedy)) campaign.remedy = cleanText(record.Remedy);
 		if (isMeaningfulValue(record.ReportReceivedDate))
-			campaign.reportDate = record.ReportReceivedDate.trim();
+			campaign.reportDate = normalizeReportDate(record.ReportReceivedDate.trim());
 		if (typeof record.parkIt === "boolean") campaign.parkIt = record.parkIt;
 		if (typeof record.parkOutSide === "boolean") campaign.parkOutside = record.parkOutSide;
 		return campaign;
@@ -388,6 +493,6 @@ export async function runCheckRecalls(vin: string) {
 			summary,
 			note: disclaimer,
 		},
-		content: [{ type: "text" as const, text: `${summary} ${disclaimer}` }],
+		content: [{ type: "text" as const, text: formatRecallsText(summary, disclaimer, recalls) }],
 	};
 }

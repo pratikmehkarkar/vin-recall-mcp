@@ -117,6 +117,38 @@ async function main() {
 			}
 		}
 
+		if (testCase.expectEveryCampaignInText) {
+			const recalls = Array.isArray(structured.recalls)
+				? (structured.recalls as { campaignNumber: string; summary: string }[])
+				: [];
+			if (recalls.length === 0) {
+				failures.push("expected structuredContent.recalls to be a non-empty array");
+			}
+			for (const recall of recalls) {
+				if (!text.includes(`Campaign ${recall.campaignNumber}`)) {
+					failures.push(
+						`campaign ${recall.campaignNumber} is missing from the text content`,
+					);
+					continue;
+				}
+				// The text may shorten long summaries, but always keeps the start.
+				const summaryOpening = recall.summary.slice(0, 60);
+				if (!text.includes(summaryOpening)) {
+					failures.push(
+						`summary for campaign ${recall.campaignNumber} is missing from the text content (looked for ${JSON.stringify(summaryOpening)})`,
+					);
+				}
+			}
+		}
+		if (
+			testCase.expectTextMaxLength !== undefined &&
+			text.length > testCase.expectTextMaxLength
+		) {
+			failures.push(
+				`expected text content length <= ${testCase.expectTextMaxLength}, got ${text.length}`,
+			);
+		}
+
 		// If the tool claims success (not isError) and returned structured
 		// content, that content must actually satisfy the same Zod schema the
 		// real MCP tool registration declares as its outputSchema — this
